@@ -1,76 +1,70 @@
 /* ============================================================
    api.js — comunicação com a API (Node + PostgreSQL)
-   Endpoints usados:
-     GET /api/filtros                       -> valores reais de UF, Região e Grupo (menus)
-     GET /api/contagem?uf=&regiao=&grupo=   -> total + contagem por grupo JÁ FILTRADOS
+     GET /api/filtros                        -> opções dos menus (UF, Cliente, Grupo)
+     GET /api/contagem?uf=&cliente=&grupo=   -> indicadores já filtrados
    ============================================================ */
 const API = (window.CONFIG && window.CONFIG.api) || 'http://localhost:3000';
+const FILTROS_DB = ['uf', 'cliente', 'grupo'];      // filtros que existem no banco
 
 // Estado compartilhado com o app.js
-//  filtros : opções dos menus (vindas do banco)
-//  cont    : resultado da última contagem filtrada (fonte única de todos os indicadores)
 const DB = {
-  filtros: { uf: [], regiao: [], grupo: [] },
-  cont: null,
+  filtros: { uf: [], cliente: [], grupo: [] },      // opções dos menus
+  cont: null,                                       // última contagem (fonte única dos indicadores)
   carregando: false,
-  erro: ''
+  erro: '',
 };
 
-// Normaliza texto para comparar nomes (sem acento, sem espaços nas pontas, maiúsculo)
+/* ---------- Helpers ---------- */
+// Compara nomes sem acento, sem espaços nas pontas, em maiúsculo
 const nk = s => String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase();
 
 async function getJson(caminho) {
   const r = await fetch(API + caminho);
-  let corpo = null;
-  try { corpo = await r.json(); } catch (_) {}
-  if (!r.ok) throw new Error((corpo && corpo.erro) || ('HTTP ' + r.status + ' em ' + caminho));
+  const corpo = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((corpo && corpo.erro) || `HTTP ${r.status} em ${caminho}`);
   return corpo;
 }
 
-// Monta ?uf=..&regiao=..&grupo=.. só com os filtros preenchidos
+// ?uf=..&cliente=..&grupo=.. só com os filtros preenchidos
 function queryFiltros(f) {
   const p = new URLSearchParams();
-  ['uf', 'regiao', 'grupo'].forEach(k => { if (f && f[k]) p.set(k, f[k]); });
+  FILTROS_DB.forEach(k => f[k] && p.set(k, f[k]));
   const s = p.toString();
   return s ? '?' + s : '';
 }
 
-// Quantidade de um grupo considerando os filtros ativos (UF + Região)
+/* ---------- Leitura do estado ---------- */
+// Quantidade de um grupo considerando UF + Cliente ativos
 function qtdGrupo(nome) {
   if (!DB.cont) return null;
-  const v = DB.cont.porGrupo[nk(nome)];
-  return v === undefined ? 0 : v;
+  return DB.cont.porGrupo[nk(nome)] ?? 0;
 }
 
 // Nome do grupo exatamente como está no banco (para o filtro bater)
-function nomeGrupoDB(nome) {
-  const achou = DB.filtros.grupo.find(g => nk(g) === nk(nome));
-  return achou || nome;
-}
+const nomeGrupoDB = nome => DB.filtros.grupo.find(g => nk(g) === nk(nome)) || nome;
 
+/* ---------- Chamadas ---------- */
 async function carregarFiltros() {
   try {
     const d = await getJson('/api/filtros');
-    DB.filtros = { uf: d.uf || [], regiao: d.regiao || [], grupo: d.grupo || [] };
+    FILTROS_DB.forEach(k => { DB.filtros[k] = d[k] || []; });
   } catch (e) {
     console.error('Falha ao carregar filtros (usando listas do config.js):', e);
   }
   route();
 }
 
-// Busca no banco a contagem de acordo com os filtros ativos.
-// Todos os indicadores do painel leem DB.cont — não existe mais outro caminho de contagem.
-let _seq = 0;
-async function carregarContagem(f) {
-  const meu = ++_seq;           // evita que uma resposta antiga sobrescreva uma mais nova
+let _seq = 0;                                       // evita resposta antiga sobrescrever a nova
+async function carregarContagem(f = st) {
+  const meu = ++_seq;
   DB.carregando = true;
   route();
   try {
-    const d = await getJson('/api/contagem' + queryFiltros(f || st));
+    const d = await getJson('/api/contagem' + queryFiltros(f));
     if (meu !== _seq) return;
     const porGrupo = {};
     (d.porGrupo || []).forEach(x => { porGrupo[nk(x.grupo)] = Number(x.quantidade); });
-    DB.cont = { total: Number(d.total), grupos: Number(d.grupos), ufs: Number(d.ufs), regioes: Number(d.regioes), porGrupo };
+    DB.cont = { total: +d.total, grupos: +d.grupos, ufs: +d.ufs, clientes: +d.clientes, porGrupo };
     DB.erro = '';
   } catch (e) {
     if (meu !== _seq) return;
@@ -82,7 +76,5 @@ async function carregarContagem(f) {
   route();
 }
 
-// Chamada inicial (o index.html confere se esta função existe)
-async function carregarGrupos() {
-  await Promise.all([carregarFiltros(), carregarContagem(st)]);
-}
+// Chamada inicial
+const carregarGrupos = () => Promise.all([carregarFiltros(), carregarContagem(st)]);
